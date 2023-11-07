@@ -3,14 +3,15 @@
 # blender: 3.0
 # ref: Mega Man Legends News Caster
 
-import sys, importlib
+import sys, importlib, dataclasses
 from math import radians
 from pathlib import Path
 
 import bpy, bmesh
-from mathutils import Matrix, Vector
 C = bpy.context
 D = bpy.data
+
+from mathutils import Matrix, Vector
 def Mat(*args): return Matrix(args)
 def Vec(*args): return Vector(args)
 Diagonal = Matrix.Diagonal
@@ -23,6 +24,99 @@ if '.' not in sys.path:
     sys.path.append('.')
 import shared
 importlib.reload(shared)
+
+@dataclasses.dataclass
+class UVIsland:
+    faces: list[bmesh.types.BMFace] = dataclasses.field(default_factory=list)
+    bbox: dict[str, float] = dataclasses.field(default_factory=dict)
+
+    def calc_bbox(self, uv_layer) -> dict[str, float]:
+        if not self.faces: return {}
+        init_uv = self.faces[0].loops[0][uv_layer].uv
+        left = right = init_uv.x
+        top = bottom = init_uv.y
+        for face in self.faces:
+            for loop in face.loops:
+                uv = loop[uv_layer].uv
+                top = max(top, uv.y)
+                left = min(left, uv.x)
+                right = max(right, uv.x)
+                bottom = min(bottom, uv.y)
+        self.bbox = { 't': top, 'l': left, 'r': right, 'b': bottom,
+                      'h': top - bottom, 'w': right - left }
+        return self.bbox
+
+# Unwrap UVs using cube projection.
+def bm_uv_cube_project(faces, uv_layer):
+    islands = { 'top':   UVIsland(), 'bottom': UVIsland(),
+                'front': UVIsland(), 'back':   UVIsland(),
+                'right': UVIsland(), 'left':   UVIsland() }
+
+    # unwrap UVs using cube projection
+    # note: faces loops produce split UVs, verts link_loops produce stitched UVs
+    # ref: blender source uvedit_unwrap_cube_project() & axis_dominant_v3()
+    for face in faces:
+        n = face.normal
+        # pick the 2 non-dominant axes for the projection
+        if abs(n.z) >= abs(n.x) and abs(n.z) >= abs(n.y):
+            i, j = 0, 1
+            islands['top' if n.z >= 0 else 'bottom'].faces.append(face)
+        elif abs(n.y) >= abs(n.x) and abs(n.y) >= abs(n.z):
+            i, j = 0, 2
+            islands['back' if n.y >= 0 else 'front'].faces.append(face)
+        else:
+            i, j = 1, 2
+            islands['right' if n.x >= 0 else 'left'].faces.append(face)
+
+        for loop in face.loops:
+            loop[uv_layer].uv.x = loop.vert.co[i]
+            loop[uv_layer].uv.y = loop.vert.co[j]
+
+    # islands' bounding boxes
+    for island in islands.values():
+        island.calc_bbox(uv_layer)
+
+    return islands
+
+# Position islands resulting from a cube projection.
+def bm_uv_cube_position(islands, uv_layer, init_offset=Vector((0.5, 0.0)), margin=0.01):
+    # position islands at (0, 0), offset them and update the bbox
+    def do_position(key, offset):
+        for face in islands[key].faces:
+            for loop in face.loops:
+                loop[uv_layer].uv.x += offset.x - islands[key].bbox['l']
+                loop[uv_layer].uv.y += offset.y - islands[key].bbox['b']
+        islands[key].calc_bbox(uv_layer)
+
+    # select which axis of the specified island will contribute to the offset
+    def do_offset(key, offset, axis):
+        if islands[key].faces:
+            offset.x += axis[0] * (islands[key].bbox['w'] + margin)
+            offset.y += axis[1] * (islands[key].bbox['h'] + margin)
+
+    # place front, top and bottom islands on the same row
+    offset = init_offset.copy()
+    do_position('front', offset)
+    do_offset('front', offset, axis=(0, 1))
+    do_position('top', offset)
+    do_offset('top', offset, axis=(0, 1))
+    do_position('bottom', offset)
+
+    # place right, back and left islands on the same column as the front island
+    offset = init_offset.copy()
+    do_offset('front', offset, axis=(1, 0))
+    do_position('right', offset)
+    do_offset('right', offset, axis=(1, 0))
+    do_position('back', offset)
+    do_offset('back', offset, axis=(1, 0))
+    do_position('left', offset)
+
+def bm_create_plane(bm, fill):
+    result = bmesh.ops.create_grid(bm, x_segments=0, y_segments=0, size=0.5)
+    if not fill:
+        bmesh.ops.delete(bm, geom=result['verts'][0].link_faces,
+                         context='FACES_ONLY')
+    return result
 
 class Character:
     @classmethod
@@ -98,9 +192,9 @@ class Character:
         bmesh.ops.pointmerge(bm, verts=(pokev[0], sphv[2]), merge_co=pokev[0].co)
 
         # UVs
-        islands = shared.bm_uv_cube_project(bm.faces, uv_layer)
+        islands = bm_uv_cube_project(bm.faces, uv_layer)
         offset = Vec(0.5, islands['front'].bbox['b'] + 1.5)
-        shared.bm_uv_cube_position(islands, uv_layer, init_offset=offset)
+        bm_uv_cube_position(islands, uv_layer, init_offset=offset)
         cls.scale_uvs(bm.faces, uv_layer, islands)
 
         # mesh & object
@@ -176,7 +270,7 @@ class Character:
         # bmesh
         bm = bmesh.new()
         uv_layer = bm.loops.layers.uv.new()
-        l1 = shared.bm_create_plane(bm, fill=False)['verts']
+        l1 = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=l1, vec=(0.07, 0.06, 1.0))
         bmesh.ops.scale(bm, verts=l1[2:], vec=(0.0, 1.07, 1.0))
         bmesh.ops.translate(bm, verts=l1, vec=(0.0, 0.02, 1.35))
@@ -203,19 +297,19 @@ class Character:
         bm = bmesh.new()
         uv_layer = bm.loops.layers.uv.new()
 
-        luppertop = shared.bm_create_plane(bm, fill=True)['verts']
+        luppertop = bm_create_plane(bm, fill=True)['verts']
         bmesh.ops.scale(bm, verts=luppertop, vec=(0.14, 0.1, 1.0))
         bmesh.ops.translate(bm, verts=luppertop, vec=(0.0, 0.015, 1.352))
 
-        luppermid = shared.bm_create_plane(bm, fill=False)['verts']
+        luppermid = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=luppermid, vec=(0.24, 0.18, 1.0))
         bmesh.ops.translate(bm, verts=luppermid, vec=(0.0, -0.017, 1.21))
 
-        lwaist = shared.bm_create_plane(bm, fill=False)['verts']
+        lwaist = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=lwaist, vec=(0.14, 0.11, 1.0))
         bmesh.ops.translate(bm, verts=lwaist, vec=(0.0, -0.02, 1.076))
 
-        lbot = shared.bm_create_plane(bm, fill=False)['verts']
+        lbot = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=lbot, vec=(0.23, 0.16, 1.0))
         bmesh.ops.translate(bm, verts=lbot, vec=(0.0, -0.004, 0.999))
 
@@ -224,9 +318,9 @@ class Character:
                                dist=0.0000001, plane_co=(0, 0, 0),
                                plane_no=(1, 0, 0), clear_inner=True)
 
-        islands = shared.bm_uv_cube_project(bm.faces, uv_layer)
+        islands = bm_uv_cube_project(bm.faces, uv_layer)
         offset = Vec(0.5, islands['front'].bbox['b'] + 0.6)
-        shared.bm_uv_cube_position(islands, uv_layer, init_offset=offset)
+        bm_uv_cube_position(islands, uv_layer, init_offset=offset)
         cls.scale_uvs(bm.faces, uv_layer, islands)
 
         # mesh & object
@@ -254,7 +348,7 @@ class Character:
 
         # shirt
         draw.rectangle(xy=((256, 242), (317, 279)), fill=(224, 232, 232))
-        draw.rectangle(xy=((265, 227), (262, 242)), fill=(224, 232, 232))
+        draw.rectangle(xy=((262, 227), (265, 242)), fill=(224, 232, 232))
         draw.polygon(xy=((256, 242), (261, 242), (256, 250)), fill=(248, 208, 168))
         draw.line(xy=((256, 251), (260, 253), (265, 242), (317, 242)),
                   fill=(200, 200, 200))
@@ -278,38 +372,38 @@ class Character:
         bm = bmesh.new()
         uv_layer = bm.loops.layers.uv.new()
 
-        l1 = shared.bm_create_plane(bm, fill=True)['verts']
+        l1 = bm_create_plane(bm, fill=True)['verts']
         bmesh.ops.scale(bm, verts=l1, vec=(0.11, 0.07, 1.0))
         bmesh.ops.rotate(bm, verts=l1, cent=l1[0].co,
                          matrix=Rotation(radians(10), 4, 'Y'))
         bmesh.ops.translate(bm, verts=l1, vec=(0.12627, 0.019375, 1.3378))
 
-        l4 = shared.bm_create_plane(bm, fill=False)['verts']
+        l4 = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=l4, vec=(0.06, 0.06, 1.0))
         bmesh.ops.rotate(bm, verts=l4, matrix=Rotation(radians(-10), 4, 'Y'))
         bmesh.ops.translate(bm, verts=l4, vec=(0.19385, 0.02, 1.0928))
 
-        l5 = shared.bm_create_plane(bm, fill=False)['verts']
+        l5 = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=l5, vec=(0.08, 0.06, 1.0))
         bmesh.ops.rotate(bm, verts=l5, matrix=Rotation(radians(-12), 4, 'Y'))
         bmesh.ops.translate(bm, verts=l5, vec=(0.23261, 0.02, 0.94141))
 
-        l6 = shared.bm_create_plane(bm, fill=False)['verts']
+        l6 = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=l6, vec=(0.12, 0.15, 1.0))
         bmesh.ops.translate(bm, verts=l6, vec=(0.24, 0.0, 0.81))
         bmesh.ops.translate(bm, verts=l6[1::1], vec=(0.0, 0.0, -0.01))
         bmesh.ops.translate(bm, verts=l6[2:3], vec=(0.03, 0.0, 0.0))
 
-        l7 = shared.bm_create_plane(bm, fill=False)['verts']
+        l7 = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=l7, vec=(0.0, 0.12, 1.0))
         bmesh.ops.translate(bm, verts=l7, vec=(0.22202, 0.01375, 0.76588))
 
         bmesh.ops.bridge_loops(bm, edges=bm.edges)
         bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
 
-        islands = shared.bm_uv_cube_project(bm.faces, uv_layer)
+        islands = bm_uv_cube_project(bm.faces, uv_layer)
         offset = Vec(0.5, islands['front'].bbox['b'] + 1.25)
-        shared.bm_uv_cube_position(islands, uv_layer, init_offset=offset)
+        bm_uv_cube_position(islands, uv_layer, init_offset=offset)
         cls.scale_uvs(bm.faces, uv_layer, islands)
 
         mesh = D.meshes.new('arm')
@@ -323,22 +417,22 @@ class Character:
         bm = bmesh.new()
         uv_layer = bm.loops.layers.uv.new()
 
-        ltop = shared.bm_create_plane(bm, fill=False)['verts']
+        ltop = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=ltop, vec=(0.16, 0.16, 1.0))
         bmesh.ops.scale(bm, verts=ltop[1::2], vec=(1.0, 1.15, 1.0))
         bmesh.ops.translate(bm, verts=ltop, vec=(0.08, 0.016, 0.83))
         bmesh.ops.translate(bm, verts=ltop[1::2], vec=(0.0, 0.0, 0.084))
 
-        lmid = shared.bm_create_plane(bm, fill=False)['verts']
+        lmid = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=lmid, vec=(0.1, 0.1, 1.0))
         bmesh.ops.translate(bm, verts=lmid, vec=(0.065, 0.025, 0.55))
 
-        lbot = shared.bm_create_plane(bm, fill=False)['verts']
+        lbot = bm_create_plane(bm, fill=False)['verts']
         bmesh.ops.scale(bm, verts=lbot, vec=(0.1, 0.1, 1.0))
         bmesh.ops.translate(bm, verts=lbot, vec=(0.06566, 0.033125, 0.0))
         bmesh.ops.translate(bm, verts=lbot[0:2], vec=(0.0, 0.0, 0.15))
 
-        lfeet = shared.bm_create_plane(bm, fill=True)['verts']
+        lfeet = bm_create_plane(bm, fill=True)['verts']
         bmesh.ops.scale(bm, verts=lfeet, vec=(0.1, 0.06, 1.0))
         bmesh.ops.translate(bm, verts=lfeet, vec=(0.06625, -0.178 + 0.03, 0.0))
         bmesh.ops.rotate(bm, verts=lfeet, cent=lfeet[0].co,
@@ -347,9 +441,9 @@ class Character:
         bmesh.ops.bridge_loops(bm, edges=bm.edges)
 
         # UVs
-        islands = shared.bm_uv_cube_project(bm.faces, uv_layer)
+        islands = bm_uv_cube_project(bm.faces, uv_layer)
         offset = Vec(0.5, islands['front'].bbox['b'])
-        shared.bm_uv_cube_position(islands, uv_layer, init_offset=offset)
+        bm_uv_cube_position(islands, uv_layer, init_offset=offset)
         cls.scale_uvs(bm.faces, uv_layer, islands)
 
         # mesh & object
@@ -404,9 +498,9 @@ class Character:
         bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.0001)
 
         # uvs
-        islands = shared.bm_uv_cube_project(bm.faces[23:27], uv_layer)
+        islands = bm_uv_cube_project(bm.faces[23:27], uv_layer)
         offset = Vec(0.5, islands['front'].bbox['b'] + 0.55)
-        shared.bm_uv_cube_position(islands, uv_layer, init_offset=offset)
+        bm_uv_cube_position(islands, uv_layer, init_offset=offset)
         cls.scale_uvs(bm.faces[23:27], uv_layer, islands)
 
         # mesh & object

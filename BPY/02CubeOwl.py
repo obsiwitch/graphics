@@ -1,13 +1,17 @@
 #!/usr/bin/env -S blender --factory-startup --python
 
 # name: Cube Owl
-# blender: 3.0
+# blender: 3.6
 # ref: https://cloud.blender.org/training/primitive-animals/
 
 import sys, math, importlib
-import bpy, bmesh
-from mathutils import Matrix, Vector
+
 import numpy as np
+
+import bpy, bmesh
+C = bpy.context
+D = bpy.data
+from mathutils import Matrix, Vector
 
 if '.' not in sys.path:
     sys.path.append('.')
@@ -45,10 +49,11 @@ def obj_evaluate(obj, remove_src=False):
 def obj_join(sources, remove_src=False):
     assert all(type(obj) == bpy.types.Object for obj in sources)
 
-    ctx = {}
-    ctx["selected_objects"] = ctx["selected_editable_objects"] = sources
-    ctx["object"] = ctx["active_object"] = sources[0]
-    bpy.ops.object.join(ctx)
+    with C.temp_override(
+        active_object = sources[0],
+        selected_editable_objects = sources,
+    ): bpy.ops.object.join()
+
     if remove_src:
         for src in sources[1:]:
             bpy.data.meshes.remove(src.data) # removes both the mesh and object

@@ -16,7 +16,7 @@ import shared
 importlib.reload(shared)
 
 # Create a template cube.
-def new_cube():
+def new_cube() -> bpy.types.Object:
     # mesh & object (alt: bpy.ops.mesh.primitive_cube_add())
     obj = shared.new_obj(bmesh.ops.create_cube, name='Cube')
 
@@ -46,7 +46,7 @@ def new_cube():
     return obj
 
 # Create a 10*10 animated grid of `obj` objects.
-def new_grid(obj):
+def new_grid(obj: bpy.types.Object) -> bpy.types.Collection:
     # grid
     collection = bpy.data.collections.new('Grid')
     for x, y in itertools.product(range(10), repeat=2):
@@ -68,7 +68,7 @@ def new_grid(obj):
 
     return collection
 
-def setup_scene(collection):
+def setup_scene(collection: bpy.types.Collection) -> None:
     # add collection to Scene Collection
     scene = bpy.data.scenes['Scene']
     scene.collection.children.link(collection)

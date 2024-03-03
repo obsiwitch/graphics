@@ -26,6 +26,18 @@ def bm_to_obj(bm: bmesh.types.BMesh, name: str, free: bool) -> bpy.types.Object:
     return D.objects.new(mesh.name, mesh)
 
 class Character:
+    def __new__(cls) -> bpy.types.Collection:
+        result = D.collections.new('character')
+
+        head = cls.head()
+        head.location.z = 0.8
+        head.scale = (0.5, 0.5, 0.5)
+        result.objects.link(head)
+
+        result.objects.link(cls.torso())
+
+        return result
+
     @classmethod
     def head(cls) -> bpy.types.Object:
         bm = bmesh.new()
@@ -63,4 +75,4 @@ class Character:
 
 if __name__ == '__main__':
     shared.delete_data()
-    D.scenes[0].collection.objects.link(Character.torso())
+    D.scenes[0].collection.children.link(Character())
